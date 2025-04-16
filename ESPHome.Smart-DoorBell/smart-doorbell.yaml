@@ -1,0 +1,384 @@
+esphome:
+  name: smart-doorbell
+  friendly_name: Smart-DoorBell
+  project:
+    name: "alastorf32.smart-doorbell"
+    version: "1.2.4"
+  
+esp8266:
+  board: d1_mini
+  restore_from_flash: true
+
+# Enable logging
+logger:
+  level: DEBUG
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: "94o/Piqm8DErd6YoQjGnGc6XmGQG4mBurL0u4XHEiZk="
+  id: ha_api  # Добавляем явный ID для API
+  services:
+    - service: set_mode
+      variables:
+        mode: int
+      then:
+        - globals.set:
+            id: operation_mode
+            value: !lambda "return mode;"
+            
+    - service: set_schedule
+      variables:
+        start_h: int
+        start_m: int
+        end_h: int
+        end_m: int
+      then:
+        - globals.set:
+            id: start_hour
+            value: !lambda 'return start_h;'
+        - globals.set:
+            id: start_minute
+            value: !lambda 'return start_m;'
+        - globals.set:
+            id: end_hour
+            value: !lambda 'return end_h;'
+        - globals.set:
+            id: end_minute
+            value: !lambda 'return end_m;'
+
+    - service: set_duration
+      variables:
+        duration: int
+      then:
+        - globals.set:
+            id: bell_duration
+            value: !lambda 'return duration;'
+        
+    - service: test_bell
+      then:
+        - lambda: |-
+            id(relay).turn_on();
+            delay(id(bell_duration));
+            id(relay).turn_off();
+
+ota:
+  - platform: esphome
+    password: "337ef28a26f3d19cb5ce1b0b7c4ef8ec"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: true
+  ap:
+    ssid: "Smart-Doorbell Fallback Hotspot"
+    password: !secret ap_password
+
+captive_portal:
+    
+# Источники времени
+time:
+  - platform: homeassistant
+    id: ha_time
+    timezone: Europe/Moscow
+    on_time_sync:
+      then:
+        - lambda: !lambda |-
+            id(current_time).publish_state(id(ha_time).now().strftime("%H:%M:%S"));
+    
+  - platform: sntp
+    id: ntp_time
+    servers: 
+      - 0.ru.pool.ntp.org
+      - 1.ru.pool.ntp.org
+
+preferences:
+  flash_write_interval: 60s
+
+# Глобальные переменные
+globals:
+  - id: operation_mode
+    type: int
+    restore_value: yes
+    initial_value: "0"
+
+  - id: start_hour
+    type: int
+    restore_value: yes
+    initial_value: "8"
+
+  - id: start_minute
+    type: int
+    restore_value: yes
+    initial_value: "0"
+
+  - id: end_hour
+    type: int
+    restore_value: yes
+    initial_value: "22"
+
+  - id: end_minute
+    type: int
+    restore_value: yes
+    initial_value: "0"
+
+  - id: bell_duration
+    type: int
+    restore_value: yes
+    initial_value: "350"
+
+# Кнопка (D1/GPIO5)
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: D1
+      mode: INPUT_PULLUP
+    name: "Нажатие кнопки"
+    icon: "mdi:button-pointer"
+    id: doorbell_button
+    filters:
+      - delayed_on: 50ms
+    on_press:
+      then:
+        - lambda: |-
+            auto now = id(ha_time).now();
+            if (!now.is_valid()) now = id(ntp_time).now();
+            
+            bool allow_ring = false;
+            switch(id(operation_mode)) {
+              case 0:  // Всегда
+                allow_ring = true;
+                break;
+              case 1:  // По расписанию
+                if (now.is_valid()) {
+                  int current_min = now.hour * 60 + now.minute;
+                  int start_min = id(start_hour) * 60 + id(start_minute);
+                  int end_min = id(end_hour) * 60 + id(end_minute);
+                  allow_ring = (current_min >= start_min) && (current_min <= end_min);
+                }
+                break;
+              default: // Выключен
+                break;
+            }
+            
+            if (allow_ring) {
+              id(relay).turn_on();
+              delay(id(bell_duration));
+              id(relay).turn_off();
+            }
+
+# Реле (D2/GPIO4)
+switch:
+  - platform: gpio
+    pin: D2
+    name: "Doorbell Relay"
+    id: relay
+    restore_mode: ALWAYS_OFF
+    internal: true  # Скрыть из интерфейса
+
+  - platform: template
+    name: "Запуск звонка"
+    id: button_pressed
+    icon: "mdi:button-pointer"
+    entity_category: diagnostic
+    optimistic: true  
+    lambda: |-
+      return false;
+
+button:
+  - platform: template
+    name: "Тест звонка"
+    id: test_bell_switch
+    icon: "mdi:bell"
+    on_press:
+      - lambda: |-
+          id(relay).turn_on();
+          delay(id(bell_duration));
+          id(relay).turn_off();
+
+number:
+  - platform: template
+    name: "Длительность звонка"
+    id: bell_duration_number
+    min_value: 50
+    max_value: 2000
+    step: 50
+    unit_of_measurement: "мс"
+    entity_category: config
+    mode: box
+    lambda: |-
+      return id(bell_duration);
+    set_action:
+      - globals.set:
+          id: bell_duration
+          value: !lambda 'return x;'
+      - delay: 100ms
+      - homeassistant.service:
+          service: esphome.smart_doorbell_set_duration
+          data:
+            duration: !lambda 'return id(bell_duration);'
+
+  - platform: template
+    name: "Начало [1]:"
+    id: start_hour_number
+    min_value: 0
+    max_value: 23
+    step: 1
+    mode: box
+    unit_of_measurement: "ч"
+    icon: "mdi:timer-check-outline"
+    entity_category: config
+    lambda: |-
+      return (int)id(start_hour);
+    set_action:
+      - globals.set:
+          id: start_hour
+          value: !lambda 'return static_cast<int>(x);'
+      - homeassistant.service:
+          service: esphome.smart_doorbell_set_schedule
+          data:
+            start_h: !lambda 'return id(start_hour);'
+            start_m: !lambda 'return id(start_minute);'
+            end_h: !lambda 'return id(end_hour);'
+            end_m: !lambda 'return id(end_minute);'
+
+  - platform: template
+    name: "Начало [2]:"
+    id: start_minute_number
+    min_value: 0
+    max_value: 59
+    step: 1
+    mode: box
+    unit_of_measurement: "мин"
+    icon: "mdi:timer-check-outline"
+    entity_category: config
+    lambda: |-
+      return (int)id(start_minute);
+    set_action:
+      - globals.set:
+          id: start_minute
+          value: !lambda 'return static_cast<int>(x);'
+      - homeassistant.service:
+          service: esphome.smart_doorbell_set_schedule
+          data:
+            start_h: !lambda 'return id(start_hour);'
+            start_m: !lambda 'return id(start_minute);'
+            end_h: !lambda 'return id(end_hour);'
+            end_m: !lambda 'return id(end_minute);'
+
+  - platform: template
+    name: "Окончание [3]:"
+    id: end_hour_number
+    min_value: 0
+    max_value: 23
+    step: 1
+    mode: box
+    unit_of_measurement: "ч"
+    icon: "mdi:timer-cancel-outline"
+    entity_category: config
+    lambda: |-
+      return (int)id(end_hour);
+    set_action:
+      - globals.set:
+          id: end_hour
+          value: !lambda 'return static_cast<int>(x);'
+      - homeassistant.service:
+          service: esphome.smart_doorbell_set_schedule
+          data:
+            start_h: !lambda 'return id(start_hour);'
+            start_m: !lambda 'return id(start_minute);'
+            end_h: !lambda 'return id(end_hour);'
+            end_m: !lambda 'return id(end_minute);'
+
+  - platform: template
+    name: "Окончание [4]:"
+    id: end_minute_number
+    min_value: 0
+    max_value: 59
+    step: 1
+    mode: box
+    unit_of_measurement: "мин"
+    icon: "mdi:timer-cancel-outline"
+    entity_category: config
+    lambda: |-
+      return (int)id(end_minute);
+    set_action:
+      - globals.set:
+          id: end_minute
+          value: !lambda 'return static_cast<int>(x);'
+      - homeassistant.service:
+          service: esphome.smart_doorbell_set_schedule
+          data:
+            start_h: !lambda 'return id(start_hour);'
+            start_m: !lambda 'return id(start_minute);'
+            end_h: !lambda 'return id(end_hour);'
+            end_m: !lambda 'return id(end_minute);'
+
+select:
+  - platform: template
+    name: "Режим звонка"
+    id: smart_doorbell_operation_mode_select
+    options:
+      - "Всегда"        # 0
+      - "По расписанию" # 1
+      - "Выключен"      # 2
+    lambda: |-
+      switch(id(operation_mode)) {
+        case 0: return std::string("Всегда");
+        case 1: return std::string("По расписанию");
+        default: return std::string("Выключен");
+      }
+    set_action:
+      - lambda: |-
+          id(operation_mode) = 
+            x == "Всегда" ? 0 :
+            x == "По расписанию" ? 1 : 2;
+      - homeassistant.service:
+          service: esphome.smart_doorbell_set_mode
+          data:
+            mode: !lambda 'return id(operation_mode);'
+
+text_sensor:
+  - platform: template
+    name: "Расписание звонка"
+    icon: "mdi:clock-digital"
+    id: current_schedule
+    lambda: |-
+      char buffer[32];
+      snprintf(buffer, sizeof(buffer), "%02d:%02d - %02d:%02d", 
+               id(start_hour), id(start_minute),
+               id(end_hour), id(end_minute));
+      return std::string(buffer);
+
+  - platform: template
+    name: "Версия прошивки"
+    id: firmware_version
+    icon: "mdi:information"
+    entity_category: "diagnostic"
+    lambda: |-
+      return std::string(ESPHOME_PROJECT_VERSION);
+
+  - platform: template
+    name: "Текущее время в плате"
+    id: current_time
+    update_interval: 60s
+    lambda: |-
+      static const std::string NA_STR = "N/A";
+      auto now = id(ha_time).now();
+      if (!now.is_valid()) now = id(ntp_time).now();
+      
+      if (now.is_valid()) {
+        char buffer[20];
+        struct tm tm = now.to_c_tm();
+        strftime(buffer, sizeof(buffer), "%H:%M:%S", &tm);
+        return std::string(buffer);
+      }
+      return NA_STR;
+
+web_server:
+  port: 80
+  auth:
+    username: !secret webserver_login
+    password: !secret webserver_password
+  version: 3
+
