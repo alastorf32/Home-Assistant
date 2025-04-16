@@ -4,8 +4,8 @@
 
 ## 📂 Список проектов
 
-### 🚪 ESPHome.Smart-DoorBell
-- **Папка**: `Smart-DoorBell/`
+### 🚪 [ESPHome.Smart-DoorBell](https://github.com/alastorf32/Home-Assistant/tree/main/ESPHome.Smart-DoorBell)
+- **Папка**: 	`Smart-DoorBell/`
 - **Описание**: Управление умной дверной звонком через Home Assistant.
 - **Файлы**: 
   - `smart-doorbell.yaml` – полный конфиг для ESPHome
